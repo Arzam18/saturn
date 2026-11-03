@@ -1,8 +1,10 @@
 #include "tt.hpp"
 #include <cstring>
+#if defined(_MSC_VER)
+#include <xmmintrin.h>
+#endif
 #include "board/board.hpp"
 #include "parameters.hpp"
-#include <xmmintrin.h>
 
 TranspositionTable g_tt;
 
@@ -114,8 +116,11 @@ void TranspositionTable::store(uint64_t key, int score, int eval,
 }
 
 void TranspositionTable::prefetch(uint64_t key) const {
-    _mm_prefetch((const char*)&buckets_[key % size_], 
-            _MM_HINT_NTA);
+#if defined(_MSC_VER)
+    _mm_prefetch((const char*)&buckets_[key % size_], _MM_HINT_NTA);
+#else
+    __builtin_prefetch((const void*)&buckets_[key % size_], 0, 0);
+#endif
 }
 
 uint64_t TranspositionTable::hashfull() const {
