@@ -1,7 +1,9 @@
+
 name: Build Saturn for Android ARM64
 
 on:
   workflow_dispatch:
+
   push:
     paths:
       - '**.cpp'
@@ -11,7 +13,9 @@ on:
       - '**.cmake'
       - 'CMakeLists.txt'
       - 'Makefile'
+      - 'default.nnue'
       - '.github/workflows/android.yml'
+
   pull_request:
     paths:
       - '**.cpp'
@@ -21,19 +25,17 @@ on:
       - '**.cmake'
       - 'CMakeLists.txt'
       - 'Makefile'
+      - 'default.nnue'
       - '.github/workflows/android.yml'
 
 jobs:
   build:
     name: Android ARM64 NEON
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Set up CMake
-        uses: lukka/get-cmake@latest
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -41,33 +43,118 @@ jobs:
           accept-android-sdk-licenses: true
           packages: platform-tools
 
-      - name: Set up Android NDK
-        uses: android-actions/setup-ndk@v2
-        with:
-          ndk-version: 27.2.12479018
-
-      - name: Configure Android ARM64
+      - name: Install Android NDK
+        shell: bash
         run: |
+          set -euo pipefail
+
+          NDK_VERSION="27.2.12479018"
+
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager | sort -V | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found"
+            exit 1
+          fi
+
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+            --install "ndk;${NDK_VERSION}"
+
+          NDK_PATH="$ANDROID_HOME/ndk/${NDK_VERSION}"
+
+          if [ ! -f "$NDK_PATH/build/cmake/android.toolchain.cmake" ]; then
+            echo "ERROR: Android NDK installation failed"
+            exit 1
+          fi
+
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
+
+          echo "Installed Android NDK:"
+          echo "$NDK_PATH"
+
+      - name: Verify NNUE network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -s default.nnue ]; then
+            echo "ERROR: default.nnue is missing or empty"
+            exit 1
+          fi
+
+          echo "NNUE network found:"
+          ls -lh default.nnue
+
+      - name: Configure Saturn for Android ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export EVALFILE="$GITHUB_WORKSPACE/default.nnue"
+
           cmake -S . -B build-android \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-march=armv8-a+simd" \
             -DCMAKE_CXX_FLAGS="-march=armv8-a+simd"
 
       - name: Build Saturn
-        run: cmake --build build-android --config Release --parallel 2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cmake --build build-android \
+            --config Release \
+            --parallel 2
 
       - name: Stage Android binary
+        shell: bash
         run: |
-          mkdir -p release
-          find build-android -type f -name "saturn" -exec cp {} release/saturn-arm64-android-neon \;
+          set -euo pipefail
 
-      - name: Verify binary
+          mkdir -p release
+
+          if [ ! -s build-android/saturn ]; then
+            echo "ERROR: Saturn executable not found"
+            find build-android -type f -maxdepth 5
+            exit 1
+          fi
+
+          cp build-android/saturn \
+            release/saturn-arm64-android-neon
+
+      - name: Verify Android binary
+        shell: bash
         run: |
-          test -s release/saturn-arm64-android-neon
-          file release/saturn-arm64-android-neon
+          set -euo pipefail
+
+          BIN="release/saturn-arm64-android-neon"
+
+          test -s "$BIN"
+
+          echo "Binary information:"
+          file "$BIN"
+
+          echo "ELF architecture:"
+          readelf -h "$BIN"
+
+          readelf -h "$BIN" | grep -q "AArch64"
+
+          echo "Checking shared libraries:"
+
+          readelf -d "$BIN" | grep NEEDED || true
+
+          if readelf -d "$BIN" | grep -q "libc++_shared.so"; then
+            echo "ERROR: Unexpected libc++_shared.so dependency"
+            exit 1
+          fi
+
+          echo "Android ARM64 NEON binary verified."
 
       - name: Upload Android ARM64 binary
         uses: actions/upload-artifact@v4
